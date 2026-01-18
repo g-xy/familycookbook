@@ -1,0 +1,1097 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>家味 & 鲜度 - 家庭云厨房</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Supabase JS SDK -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    
+    <style>
+        body { -webkit-tap-highlight-color: transparent; }
+        .scrollbar-hide::-webkit-scrollbar { display: none; }
+        .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+        @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+        .animate-fade-in { animation: fade-in 0.3s ease-out; }
+        @keyframes slide-up { from { transform: translateY(100%); } to { transform: translateY(0); } }
+        .animate-slide-up { animation: slide-up 0.3s ease-out; }
+        @keyframes slide-in-right { from { transform: translateX(100%); } to { transform: translateX(0); } }
+        .animate-slide-in-right { animation: slide-in-right 0.3s ease-out; }
+    </style>
+
+    <!-- Import Map for React -->
+    <script type="importmap">
+    {
+      "imports": {
+        "react": "https://esm.sh/react@18.2.0",
+        "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
+        "lucide-react": "https://esm.sh/lucide-react@0.330.0?deps=react@18.2.0"
+      }
+    }
+    </script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body class="bg-gray-50 text-gray-900">
+    <div id="root"></div>
+
+    <script type="text/babel" data-type="module">
+        import React, { useState, useEffect, useMemo, useRef } from 'react';
+        import { createRoot } from 'react-dom/client';
+        import { 
+          ChefHat, Refrigerator, Plus, Heart, MessageSquare, Utensils, 
+          Clock, AlertTriangle, CheckCircle, Camera, Snowflake, Archive, 
+          Trash2, Send, User, Edit, History, Activity, Grid, X, 
+          Image as ImageIcon, CloudOff, Wifi, Database, Terminal, Copy, Check
+        } from 'lucide-react';
+
+        // =================================================================
+        // ⚠️⚠️⚠️ 请在此处填入您的 Supabase 配置 ⚠️⚠️⚠️
+        // =================================================================
+        const SUPABASE_URL = "https://euvewhekrvzjjfcrknfg.supabase.co"; // 替换为 Project URL
+        const SUPABASE_KEY = "sb_publishable_LLHK4IwAJKtSHkudSVf8cw_6J6tqUWX"; // 替换为 API Key (anon public)
+
+        // 初始化 Supabase
+        let supabase;
+        try {
+            supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+        } catch (e) {
+            console.error("Supabase init failed", e);
+        }
+
+        // --- 工具函数 ---
+        const getUserId = () => {
+            let uid = localStorage.getItem('chef_uid');
+            if (!uid) {
+                uid = 'user_' + Math.random().toString(36).substr(2, 9);
+                localStorage.setItem('chef_uid', uid);
+            }
+            return uid;
+        };
+
+        const compressImage = (file) => {
+            return new Promise((resolve) => {
+                const reader = new FileReader();
+                reader.readAsDataURL(file);
+                reader.onload = (event) => {
+                    const img = new Image();
+                    img.src = event.target.result;
+                    img.onload = () => {
+                        const canvas = document.createElement('canvas');
+                        const MAX_WIDTH = 600; 
+                        const scaleSize = MAX_WIDTH / img.width;
+                        canvas.width = MAX_WIDTH;
+                        canvas.height = img.height * scaleSize;
+                        const ctx = canvas.getContext('2d');
+                        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                        resolve(canvas.toDataURL('image/jpeg', 0.6));
+                    };
+                };
+            });
+        };
+
+        const calculateDaysLeft = (dateStr, shelfLife) => {
+            if (!dateStr || !shelfLife) return 0;
+            const purchaseDate = new Date(dateStr);
+            const expireDate = new Date(purchaseDate);
+            expireDate.setDate(purchaseDate.getDate() + parseInt(shelfLife));
+            const today = new Date();
+            const diffTime = expireDate - today;
+            return Math.ceil(diffTime / (1000 * 60 * 60 * 24)); 
+        };
+
+        const getExpiryStatus = (daysLeft) => {
+            if (daysLeft < 0) return { color: 'text-red-500 bg-red-50', label: '已过期', icon: AlertTriangle };
+            if (daysLeft <= 2) return { color: 'text-orange-500 bg-orange-50', label: '即将过期', icon: Clock };
+            return { color: 'text-green-600 bg-green-50', label: '新鲜', icon: CheckCircle };
+        };
+
+        // --- 核心数据 Hook ---
+        const useSupabaseData = (tableName, onTableMissing) => {
+            const [data, setData] = useState([]);
+            
+            const fetchData = async () => {
+                const { data: rows, error } = await supabase
+                    .from(tableName)
+                    .select('*')
+                    .order('created_at', { ascending: false });
+                
+                if (error) {
+                    console.error(`Error fetching ${tableName}:`, error);
+                    // 检测表不存在的错误代码 PGRST205
+                    if (error.code === 'PGRST205' && onTableMissing) {
+                        onTableMissing();
+                    }
+                }
+                else setData(rows.map(r => ({ ...r.data, db_id: r.id }))); 
+            };
+
+            useEffect(() => {
+                fetchData();
+                const channel = supabase
+                    .channel('public:' + tableName)
+                    .on('postgres_changes', { event: '*', schema: 'public', table: tableName }, (payload) => {
+                        fetchData(); 
+                    })
+                    .subscribe();
+
+                return () => {
+                    supabase.removeChannel(channel);
+                };
+            }, [tableName]);
+
+            return { data, refresh: fetchData };
+        };
+
+        // --- 安装引导组件 ---
+        const SetupGuide = () => {
+            const [copied, setCopied] = useState(false);
+            const sqlCode = `-- 创建菜谱表
+create table public.recipes (
+  id bigint generated by default as identity primary key,
+  data jsonb,
+  created_at timestamptz default now()
+);
+
+-- 创建冰箱表
+create table public.fridge_items (
+  id bigint generated by default as identity primary key,
+  data jsonb,
+  created_at timestamptz default now()
+);
+
+-- 创建日志表
+create table public.logs (
+  id bigint generated by default as identity primary key,
+  data jsonb,
+  created_at timestamptz default now()
+);
+
+-- 开启实时功能
+alter publication supabase_realtime add table recipes, fridge_items, logs;
+
+-- 允许所有人读写
+alter table public.recipes enable row level security;
+create policy "Allow all access" on public.recipes for all using (true) with check (true);
+
+alter table public.fridge_items enable row level security;
+create policy "Allow all access" on public.fridge_items for all using (true) with check (true);
+
+alter table public.logs enable row level security;
+create policy "Allow all access" on public.logs for all using (true) with check (true);`;
+
+            const copyCode = () => {
+                navigator.clipboard.writeText(sqlCode);
+                setCopied(true);
+                setTimeout(() => setCopied(false), 2000);
+            };
+
+            return (
+                <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
+                    <div className="bg-white max-w-2xl w-full rounded-2xl shadow-xl overflow-hidden border border-gray-100">
+                        <div className="bg-gradient-to-r from-blue-600 to-indigo-600 p-6 text-white">
+                            <h2 className="text-2xl font-bold flex items-center gap-2">
+                                <Database className="text-blue-200" />
+                                数据库初始化
+                            </h2>
+                            <p className="text-blue-100 mt-2 text-sm">
+                                检测到 Supabase 连接成功，但尚未创建数据表。请按照以下步骤完成设置。
+                            </p>
+                        </div>
+                        <div className="p-6 space-y-6">
+                            <div className="space-y-4">
+                                <div className="flex items-start gap-3">
+                                    <div className="w-6 h-6 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center font-bold flex-shrink-0">1</div>
+                                    <div>
+                                        <p className="font-medium text-gray-900">登录 Supabase</p>
+                                        <p className="text-sm text-gray-500">打开您的 Supabase 项目后台。</p>
+                                    </div>
+                                </div>
+                                <div className="flex items-start gap-3">
+                                    <div className="w-6 h-6 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center font-bold flex-shrink-0">2</div>
+                                    <div>
+                                        <p className="font-medium text-gray-900">打开 SQL Editor</p>
+                                        <p className="text-sm text-gray-500">在左侧菜单栏找到 <Terminal size={14} className="inline"/> 图标，点击 "New query"。</p>
+                                    </div>
+                                </div>
+                                <div className="flex items-start gap-3">
+                                    <div className="w-6 h-6 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center font-bold flex-shrink-0">3</div>
+                                    <div>
+                                        <p className="font-medium text-gray-900">运行建表代码</p>
+                                        <p className="text-sm text-gray-500 mb-2">复制下方的代码，粘贴到编辑器中，点击右下角的 "Run"。</p>
+                                        <div className="relative bg-gray-900 rounded-lg p-4 font-mono text-xs text-green-400 overflow-x-auto">
+                                            <button 
+                                                onClick={copyCode}
+                                                className="absolute top-2 right-2 p-2 bg-white/10 hover:bg-white/20 rounded text-white transition-colors"
+                                                title="复制代码"
+                                            >
+                                                {copied ? <Check size={16} /> : <Copy size={16} />}
+                                            </button>
+                                            <pre>{sqlCode}</pre>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div className="pt-4 border-t text-center">
+                                <p className="text-sm text-gray-500 mb-3">运行成功后，刷新此页面即可。</p>
+                                <button onClick={() => window.location.reload()} className="bg-blue-600 text-white px-6 py-2 rounded-lg hover:bg-blue-700 transition-colors">
+                                    我已运行，刷新页面
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        // --- 子组件 ---
+
+        const RecipeTab = ({ recipes, onOpenAdd, onSelect, onLike, onOrder }) => {
+            return (
+            <div className="pb-24 animate-fade-in">
+                <div className="bg-gradient-to-r from-orange-100 to-amber-50 p-6 rounded-b-3xl mb-6 shadow-sm">
+                    <h2 className="text-2xl font-bold text-orange-800 mb-2">今天吃什么？</h2>
+                    <p className="text-orange-600 text-sm">收录了 {recipes.length} 道家庭拿手菜</p>
+                </div>
+
+                <div className="px-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {recipes.map(recipe => {
+                        const coverImage = recipe.images && recipe.images.length > 0 ? recipe.images[0] : null;
+                        const tags = typeof recipe.ingredients === 'string'
+                            ? recipe.ingredients.split(/[,，、\s]+/).filter(Boolean).slice(0, 4) 
+                            : [];
+
+                        return (
+                            <div key={recipe.db_id} onClick={() => onSelect(recipe)} className="bg-white rounded-xl shadow-sm overflow-hidden border border-gray-100 flex flex-col cursor-pointer hover:shadow-md transition-shadow">
+                                <div 
+                                    className="h-48 bg-gray-200 bg-cover bg-center relative"
+                                    style={{ backgroundImage: `url(${coverImage || 'https://via.placeholder.com/400x300?text=暂无图片'})` }}
+                                >
+                                    <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent p-3 pt-10">
+                                        <h3 className="text-white font-bold text-lg truncate">{recipe.name}</h3>
+                                        {recipe.duration && (
+                                            <div className="flex items-center text-white/90 text-xs gap-3">
+                                                <span className="flex items-center gap-1"><Clock size={12} /> {recipe.duration}分钟</span>
+                                            </div>
+                                        )}
+                                    </div>
+                                    {recipe.images && recipe.images.length > 1 && (
+                                        <div className="absolute top-2 right-2 bg-black/50 text-white text-[10px] px-2 py-1 rounded-full flex items-center gap-1">
+                                            <ImageIcon size={10} /> {recipe.images.length}
+                                        </div>
+                                    )}
+                                </div>
+                                
+                                <div className="p-3 bg-white flex flex-col gap-2">
+                                    {tags.length > 0 && (
+                                        <div className="flex flex-wrap gap-1.5 min-h-[20px]">
+                                            {tags.map((tag, i) => (
+                                                <span key={i} className="text-[10px] bg-orange-50 text-orange-600 px-1.5 py-0.5 rounded border border-orange-100">
+                                                    {tag}
+                                                </span>
+                                            ))}
+                                        </div>
+                                    )}
+
+                                    <div className="flex items-center justify-between pt-1">
+                                        <div className="flex gap-4 text-sm text-gray-500">
+                                            <button onClick={(e) => onLike(e, recipe)} className="flex items-center gap-1 hover:text-red-500 transition-colors">
+                                                <Heart size={18} className={recipe.likes > 0 ? "fill-red-500 text-red-500" : ""} />
+                                                <span>{recipe.likes}</span>
+                                            </button>
+                                            <div className="flex items-center gap-1">
+                                                <MessageSquare size={18} />
+                                                <span>{recipe.comments?.length || 0}</span>
+                                            </div>
+                                        </div>
+                                        
+                                        <button 
+                                            onClick={(e) => onOrder(e, recipe)}
+                                            className="bg-orange-100 text-orange-600 px-3 py-1.5 rounded-full text-xs font-semibold flex items-center gap-1 hover:bg-orange-200 transition-colors"
+                                        >
+                                            <Utensils size={14} />
+                                            点餐 ({recipe.orders || 0})
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        );
+                    })}
+                    {recipes.length === 0 && (
+                        <div className="col-span-full text-center py-12 text-gray-400">
+                            <Utensils className="mx-auto mb-3 opacity-30" size={48} />
+                            <p>还没有菜谱，快来添加第一道拿手菜吧！</p>
+                        </div>
+                    )}
+                </div>
+
+                <button 
+                    onClick={onOpenAdd}
+                    className="fixed bottom-24 right-6 bg-orange-500 hover:bg-orange-600 text-white p-4 rounded-full shadow-lg transition-transform active:scale-95 z-30 flex items-center justify-center"
+                >
+                    <Plus size={24} />
+                </button>
+            </div>
+            );
+        };
+
+        const FridgeTab = ({ fridgeItems, onDelete, onOpenAdd }) => {
+            const [filterType, setFilterType] = useState('all');
+
+            const sortedItems = useMemo(() => {
+                let items = fridgeItems;
+                if (filterType !== 'all') {
+                    items = items.filter(item => item.storage === filterType);
+                }
+                return [...items].sort((a, b) => {
+                    const daysA = calculateDaysLeft(a.purchaseDate, a.shelfLife);
+                    const daysB = calculateDaysLeft(b.purchaseDate, b.shelfLife);
+                    return daysA - daysB;
+                });
+            }, [fridgeItems, filterType]);
+
+            const filterOptions = [
+                { id: 'all', label: '全部', icon: Grid },
+                { id: 'cold', label: '冷藏', icon: Refrigerator },
+                { id: 'frozen', label: '冷冻', icon: Snowflake },
+                { id: 'ambient', label: '常温', icon: Archive },
+            ];
+
+            return (
+                <div className="pb-24 animate-fade-in">
+                    <div className="bg-gradient-to-r from-blue-100 to-indigo-50 p-6 rounded-b-3xl mb-6 shadow-sm">
+                        <h2 className="text-2xl font-bold text-blue-800 mb-4">冰箱里有什么？</h2>
+                        
+                        <div className="flex p-1 bg-white/60 rounded-xl mb-4 overflow-x-auto scrollbar-hide">
+                            {filterOptions.map(option => (
+                                <button
+                                    key={option.id}
+                                    onClick={() => setFilterType(option.id)}
+                                    className={`flex-1 flex items-center justify-center gap-1 py-2 text-xs font-medium rounded-lg transition-all min-w-[70px] ${
+                                        filterType === option.id 
+                                            ? 'bg-white text-blue-600 shadow-sm' 
+                                            : 'text-gray-500 hover:bg-white/40'
+                                    }`}
+                                >
+                                    <option.icon size={14} />
+                                    {option.label}
+                                </button>
+                            ))}
+                        </div>
+
+                        <div className="flex gap-4">
+                            <div className="bg-white/60 p-2 rounded-lg flex-1 text-center">
+                                <div className="text-xl font-bold text-green-600">{sortedItems.filter(i => calculateDaysLeft(i.purchaseDate, i.shelfLife) > 2).length}</div>
+                                <div className="text-xs text-gray-500">新鲜</div>
+                            </div>
+                            <div className="bg-white/60 p-2 rounded-lg flex-1 text-center">
+                                <div className="text-xl font-bold text-orange-500">{sortedItems.filter(i => {
+                                    const d = calculateDaysLeft(i.purchaseDate, i.shelfLife);
+                                    return d >= 0 && d <= 2;
+                                }).length}</div>
+                                <div className="text-xs text-gray-500">临期</div>
+                            </div>
+                            <div className="bg-white/60 p-2 rounded-lg flex-1 text-center">
+                                <div className="text-xl font-bold text-red-500">{sortedItems.filter(i => calculateDaysLeft(i.purchaseDate, i.shelfLife) < 0).length}</div>
+                                <div className="text-xs text-gray-500">过期</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="px-4 space-y-3">
+                        {sortedItems.map(item => {
+                            const daysLeft = calculateDaysLeft(item.purchaseDate, item.shelfLife);
+                            const status = getExpiryStatus(daysLeft);
+                            const StatusIcon = status.icon;
+
+                            return (
+                                <div key={item.db_id} className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 flex items-center justify-between">
+                                    <div className="flex items-center gap-4 overflow-hidden">
+                                        <div className={`w-16 h-16 rounded-lg bg-gray-100 flex-shrink-0 overflow-hidden flex items-center justify-center ${
+                                            item.image ? 'bg-white' : ''
+                                        }`}>
+                                            {item.image ? (
+                                                <img src={item.image} className="w-full h-full object-cover" />
+                                            ) : (
+                                                item.storage === 'frozen' ? <Snowflake size={24} className="text-blue-300"/> : 
+                                                item.storage === 'cold' ? <Refrigerator size={24} className="text-cyan-300"/> : 
+                                                <Archive size={24} className="text-orange-300"/>
+                                            )}
+                                        </div>
+                                        <div className="flex-1 min-w-0">
+                                            <h3 className="font-bold text-gray-800 truncate">{item.name}</h3>
+                                            <div className="flex items-center gap-2 text-xs text-gray-500 mt-1">
+                                                <span className={`px-1.5 py-0.5 rounded text-[10px] ${status.color} flex items-center gap-1 whitespace-nowrap`}>
+                                                    <StatusIcon size={10} />
+                                                    {status.label} {daysLeft >= 0 ? `剩${daysLeft}天` : `过${Math.abs(daysLeft)}天`}
+                                                </span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <button 
+                                        onClick={() => onDelete(item.db_id)}
+                                        className="text-gray-300 hover:text-red-500 p-2"
+                                    >
+                                        <Trash2 size={18} />
+                                    </button>
+                                </div>
+                            );
+                        })}
+                        {sortedItems.length === 0 && (
+                            <div className="text-center py-12 text-gray-400">
+                                <Refrigerator className="mx-auto mb-3 opacity-30" size={48} />
+                                <p>冰箱空空如也，去买点菜吧！</p>
+                            </div>
+                        )}
+                    </div>
+
+                    <button 
+                        onClick={onOpenAdd}
+                        className="fixed bottom-24 right-6 bg-blue-500 hover:bg-blue-600 text-white p-4 rounded-full shadow-lg transition-transform active:scale-95 z-30 flex items-center justify-center"
+                    >
+                        <Plus size={24} />
+                    </button>
+                </div>
+            );
+        };
+
+        const HistoryTab = ({ logs }) => {
+            const groupedLogs = useMemo(() => {
+                const groups = {};
+                logs.forEach(log => {
+                    const ts = log.createdAt || log.created_at;
+                    if (!ts) return;
+                    const date = new Date(ts).toLocaleDateString();
+                    if (!groups[date]) groups[date] = [];
+                    groups[date].push(log);
+                });
+                return groups;
+            }, [logs]);
+
+            const getLogIcon = (type) => {
+                switch(type) {
+                    case 'order': return <Utensils size={14} className="text-orange-500"/>;
+                    case 'like': return <Heart size={14} className="text-red-500"/>;
+                    case 'comment': return <MessageSquare size={14} className="text-blue-500"/>;
+                    default: return <Activity size={14} className="text-gray-500"/>;
+                }
+            };
+
+            const getLogText = (log) => {
+                switch(log.type) {
+                    case 'order': return '点了这道菜';
+                    case 'like': return '点赞了这道菜';
+                    case 'comment': return `评论：${log.details}`;
+                    default: return '进行了操作';
+                }
+            };
+
+            return (
+                <div className="pb-24 animate-fade-in">
+                    <div className="bg-gradient-to-r from-purple-100 to-pink-50 p-6 rounded-b-3xl mb-6 shadow-sm">
+                        <h2 className="text-2xl font-bold text-purple-800 mb-2">家庭动态</h2>
+                        <p className="text-purple-600 text-sm">看看家人们最近都爱吃什么</p>
+                    </div>
+
+                    <div className="px-4 space-y-6">
+                        {Object.entries(groupedLogs).length === 0 && (
+                            <div className="text-center py-12 text-gray-400">
+                                <History className="mx-auto mb-3 opacity-30" size={48} />
+                                <p>暂无动态，快去点餐吧！</p>
+                            </div>
+                        )}
+
+                        {Object.keys(groupedLogs).sort((a,b) => new Date(b) - new Date(a)).map(date => (
+                            <div key={date}>
+                                <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3 ml-2">{date}</h3>
+                                <div className="space-y-3">
+                                    {groupedLogs[date].map(log => (
+                                        <div key={log.db_id} className="bg-white p-3 rounded-xl shadow-sm border border-gray-100 flex gap-3 items-start">
+                                            <div className="w-12 h-12 bg-gray-100 rounded-lg flex-shrink-0 overflow-hidden">
+                                                {log.recipeImage ? (
+                                                    <img src={log.recipeImage} className="w-full h-full object-cover" />
+                                                ) : (
+                                                    <div className="w-full h-full flex items-center justify-center"><ChefHat size={20} className="text-gray-300"/></div>
+                                                )}
+                                            </div>
+                                            <div className="flex-1">
+                                                <div className="flex justify-between items-start">
+                                                    <span className="font-bold text-gray-800 text-sm">{log.recipeName}</span>
+                                                    <span className="text-[10px] text-gray-400">
+                                                        {new Date(log.createdAt || Date.now()).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                                                    </span>
+                                                </div>
+                                                <div className="flex items-center gap-2 mt-1 bg-gray-50 p-2 rounded-lg">
+                                                    <div className="bg-white p-1 rounded-full shadow-sm">{getLogIcon(log.type)}</div>
+                                                    <span className="text-xs text-gray-600">{getLogText(log)}</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            );
+        };
+
+        // --- 主组件 ---
+
+        function App() {
+            const [activeTab, setActiveTab] = useState('recipes'); 
+            const userId = useMemo(() => getUserId(), []);
+            
+            // Setup & Error State
+            const [tableMissing, setTableMissing] = useState(false);
+            const handleTableMissing = () => setTableMissing(true);
+
+            // Supabase Data Hooks
+            const { data: recipes, refresh: refreshRecipes } = useSupabaseData('recipes', handleTableMissing);
+            const { data: fridgeItems, refresh: refreshFridge } = useSupabaseData('fridge_items', handleTableMissing);
+            const { data: logs, refresh: refreshLogs } = useSupabaseData('logs', handleTableMissing);
+
+            // Modal States
+            const [isRecipeModalOpen, setIsRecipeModalOpen] = useState(false);
+            const [isEditingRecipe, setIsEditingRecipe] = useState(false);
+            const [editingRecipeId, setEditingRecipeId] = useState(null);
+            const [isAddFridgeItemOpen, setIsAddFridgeItemOpen] = useState(false);
+            const [selectedRecipe, setSelectedRecipe] = useState(null); 
+
+            // Form Refs & State
+            const recipeFormRef = useRef(null);
+            const [previewImages, setPreviewImages] = useState([]); 
+            const [fridgePreviewImage, setFridgePreviewImage] = useState('');
+            const [isSimulatingAI, setIsSimulatingAI] = useState(false);
+            const [newItemForm, setNewItemForm] = useState({ name: '', shelfLife: '7' });
+
+            // Actions - Using Supabase
+            const handleRecipeImageChange = async (e) => {
+                const files = Array.from(e.target.files);
+                if (files.length > 0) {
+                    const newImages = await Promise.all(files.map(file => compressImage(file)));
+                    setPreviewImages(prev => [...prev, ...newImages]);
+                }
+            };
+
+            const removeRecipeImage = (index) => {
+                setPreviewImages(prev => prev.filter((_, i) => i !== index));
+            };
+
+            const handleFridgeImageChange = async (e) => {
+                const file = e.target.files[0];
+                if (file) {
+                    const compressed = await compressImage(file);
+                    setFridgePreviewImage(compressed);
+                }
+            };
+
+            const logActivity = async (type, recipe, commentText = '') => {
+                const cover = recipe.images && recipe.images[0];
+                await supabase.from('logs').insert({
+                    data: {
+                        type, 
+                        recipeId: recipe.db_id,
+                        recipeName: recipe.name,
+                        recipeImage: cover,
+                        details: commentText,
+                        createdAt: new Date().toISOString(),
+                        userId: userId
+                    }
+                });
+            };
+
+            // CRUD Handlers
+            const openAddRecipeModal = () => {
+                setIsEditingRecipe(false);
+                setEditingRecipeId(null);
+                setPreviewImages([]);
+                setIsRecipeModalOpen(true);
+            };
+
+            const openEditRecipeModal = (recipe) => {
+                setIsEditingRecipe(true);
+                setEditingRecipeId(recipe.db_id);
+                setPreviewImages(recipe.images || []);
+                setIsRecipeModalOpen(true);
+                setTimeout(() => {
+                    if (recipeFormRef.current) {
+                        const form = recipeFormRef.current;
+                        form.name.value = recipe.name;
+                        form.duration.value = recipe.duration || '';
+                        form.ingredients.value = recipe.ingredients || '';
+                        form.method.value = recipe.method || '';
+                    }
+                }, 100);
+            };
+
+            const handleSaveRecipe = async (e) => {
+                e.preventDefault();
+                const form = e.target;
+                
+                const recipeData = {
+                    name: form.name.value,
+                    images: previewImages, 
+                    ingredients: form.ingredients.value,
+                    method: form.method.value,
+                    duration: form.duration.value,
+                    updatedAt: new Date().toISOString()
+                };
+
+                if (!isEditingRecipe) {
+                    recipeData.createdAt = new Date().toISOString();
+                    recipeData.likes = 0;
+                    recipeData.orders = 0;
+                    recipeData.comments = [];
+                    recipeData.authorId = userId;
+                    await supabase.from('recipes').insert({ data: recipeData });
+                } else {
+                    // Update
+                    const original = recipes.find(r => r.db_id === editingRecipeId);
+                    recipeData.likes = original.likes;
+                    recipeData.orders = original.orders;
+                    recipeData.comments = original.comments;
+                    recipeData.createdAt = original.createdAt;
+                    
+                    await supabase.from('recipes').update({ data: recipeData }).eq('id', editingRecipeId);
+                    setSelectedRecipe(prev => prev && prev.db_id === editingRecipeId ? { ...prev, ...recipeData } : prev);
+                }
+                
+                setIsRecipeModalOpen(false);
+                setPreviewImages([]);
+                refreshRecipes();
+            };
+
+            const simulateAI = () => {
+                setIsSimulatingAI(true);
+                setTimeout(() => {
+                    const foods = [
+                        { name: '西蓝花', shelfLife: 5 },
+                        { name: '牛排', shelfLife: 30 },
+                        { name: '牛奶', shelfLife: 7 },
+                        { name: '鸡蛋', shelfLife: 14 }
+                    ];
+                    const random = foods[Math.floor(Math.random() * foods.length)];
+                    setNewItemForm({ name: random.name, shelfLife: random.shelfLife.toString() });
+                    setIsSimulatingAI(false);
+                }, 1200);
+            };
+
+            const handleAddFridgeItem = async (e) => {
+                e.preventDefault();
+                const form = e.target;
+                const newItem = {
+                    name: form.name.value,
+                    storage: form.storage.value, 
+                    purchaseDate: form.date.value,
+                    shelfLife: parseInt(form.shelfLife.value),
+                    image: fridgePreviewImage || '',
+                    addedBy: userId,
+                    createdAt: new Date().toISOString()
+                };
+
+                await supabase.from('fridge_items').insert({ data: newItem });
+                setIsAddFridgeItemOpen(false);
+                setFridgePreviewImage('');
+                form.reset();
+                refreshFridge();
+            };
+
+            const handleLike = async (e, recipe) => {
+                e.stopPropagation();
+                const newLikes = (recipe.likes || 0) + 1;
+                const updated = { ...recipe, likes: newLikes };
+                const { db_id, ...rest } = updated;
+                await supabase.from('recipes').update({ data: rest }).eq('id', recipe.db_id);
+                logActivity('like', recipe);
+                refreshRecipes();
+            };
+
+            const handleOrder = async (e, recipe) => {
+                e.stopPropagation();
+                const newOrders = (recipe.orders || 0) + 1;
+                const updated = { ...recipe, orders: newOrders };
+                const { db_id, ...rest } = updated;
+                await supabase.from('recipes').update({ data: rest }).eq('id', recipe.db_id);
+                logActivity('order', recipe);
+                refreshRecipes();
+            };
+
+            const handleComment = async (e, recipe) => {
+                e.preventDefault();
+                const text = e.target.comment.value;
+                if (!text.trim()) return;
+
+                const comment = {
+                    text,
+                    author: '家人', 
+                    createdAt: new Date().toISOString(),
+                    uid: userId
+                };
+
+                const newComments = [...(recipe.comments || []), comment];
+                const updated = { ...recipe, comments: newComments };
+                const { db_id, ...rest } = updated;
+                
+                await supabase.from('recipes').update({ data: rest }).eq('id', recipe.db_id);
+                logActivity('comment', recipe, text);
+                
+                setSelectedRecipe(prev => ({
+                    ...prev,
+                    comments: newComments
+                }));
+                e.target.reset();
+                refreshRecipes();
+            };
+
+            const deleteFridgeItem = async (id) => {
+                if(confirm('确定吃完了吗？')) {
+                    await supabase.from('fridge_items').delete().eq('id', id);
+                    refreshFridge();
+                }
+            };
+
+            const openAddFridgeModal = () => {
+                setFridgePreviewImage('');
+                setIsAddFridgeItemOpen(true);
+            };
+
+            // If tables are missing, show the setup guide
+            if (tableMissing) {
+                return <SetupGuide />;
+            }
+
+            return (
+                <div className="font-sans text-gray-900 bg-gray-50 min-h-screen">
+                    <div className="max-w-2xl mx-auto min-h-screen bg-white shadow-xl relative pb-20 border-x border-gray-100">
+                        {activeTab === 'recipes' && (
+                            <RecipeTab 
+                                recipes={recipes} 
+                                onOpenAdd={openAddRecipeModal} 
+                                onSelect={setSelectedRecipe}
+                                onLike={handleLike}
+                                onOrder={handleOrder}
+                            />
+                        )}
+                        {activeTab === 'fridge' && (
+                            <FridgeTab 
+                                fridgeItems={fridgeItems} 
+                                onDelete={deleteFridgeItem}
+                                onOpenAdd={openAddFridgeModal}
+                            />
+                        )}
+                        {activeTab === 'history' && <HistoryTab logs={logs} />}
+                    </div>
+
+                    {/* Navigation */}
+                    <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200 z-40">
+                        <div className="max-w-2xl mx-auto flex justify-around p-2">
+                            <button 
+                                onClick={() => setActiveTab('recipes')}
+                                className={`flex flex-col items-center p-2 rounded-xl flex-1 transition-colors ${activeTab === 'recipes' ? 'text-orange-600 bg-orange-50' : 'text-gray-400'}`}
+                            >
+                                <ChefHat size={24} className={activeTab === 'recipes' ? 'mb-1' : 'mb-1 opacity-50'} />
+                                <span className="text-xs font-medium">餐谱</span>
+                            </button>
+                            
+                            <button 
+                                onClick={() => setActiveTab('fridge')}
+                                className={`flex flex-col items-center p-2 rounded-xl flex-1 transition-colors ${activeTab === 'fridge' ? 'text-blue-600 bg-blue-50' : 'text-gray-400'}`}
+                            >
+                                <Refrigerator size={24} className={activeTab === 'fridge' ? 'mb-1' : 'mb-1 opacity-50'} />
+                                <span className="text-xs font-medium">冰箱</span>
+                            </button>
+
+                            <button 
+                                onClick={() => setActiveTab('history')}
+                                className={`flex flex-col items-center p-2 rounded-xl flex-1 transition-colors ${activeTab === 'history' ? 'text-purple-600 bg-purple-50' : 'text-gray-400'}`}
+                            >
+                                <Activity size={24} className={activeTab === 'history' ? 'mb-1' : 'mb-1 opacity-50'} />
+                                <span className="text-xs font-medium">动态</span>
+                            </button>
+                        </div>
+                        <div className="h-safe-area-bottom bg-white" />
+                    </div>
+
+                    {/* Modals from previous version adapted for Supabase (using same state logic) */}
+                    {/* Add/Edit Recipe Modal */}
+                    {isRecipeModalOpen && (
+                        <div className="fixed inset-0 bg-black/50 z-50 flex items-end md:items-center justify-center p-0 md:p-4 animate-fade-in">
+                            <div className="bg-white w-full md:max-w-lg md:rounded-2xl rounded-t-2xl max-h-[90vh] overflow-y-auto animate-slide-up">
+                                <div className="p-4 border-b flex justify-between items-center sticky top-0 bg-white z-10">
+                                    <h3 className="font-bold text-lg text-gray-900">{isEditingRecipe ? '编辑菜谱' : '添加新菜谱'}</h3>
+                                    <button onClick={() => setIsRecipeModalOpen(false)} className="text-gray-500">关闭</button>
+                                </div>
+                                <form ref={recipeFormRef} onSubmit={handleSaveRecipe} className="p-4 space-y-4">
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-1">菜品名称 <span className="text-red-500">*</span></label>
+                                        <input required name="name" className="w-full border rounded-lg p-2 focus:ring-2 focus:ring-orange-500 outline-none" placeholder="例如：红烧肉" />
+                                    </div>
+                                    
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-2">菜品图片 (支持多张)</label>
+                                        <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-hide">
+                                            <div className="relative w-24 h-24 bg-gray-50 border border-dashed rounded-lg flex-shrink-0 flex items-center justify-center cursor-pointer hover:bg-gray-100">
+                                                <Plus className="text-gray-400" />
+                                                <input type="file" accept="image/*" multiple onChange={handleRecipeImageChange} className="absolute inset-0 opacity-0 cursor-pointer" />
+                                            </div>
+                                            
+                                            {previewImages.map((img, idx) => (
+                                                <div key={idx} className="relative w-24 h-24 rounded-lg overflow-hidden flex-shrink-0 border border-gray-200">
+                                                    <img src={img} className="w-full h-full object-cover" />
+                                                    <button 
+                                                        type="button"
+                                                        onClick={() => removeRecipeImage(idx)}
+                                                        className="absolute top-1 right-1 bg-black/50 text-white rounded-full p-1 hover:bg-red-500"
+                                                    >
+                                                        <X size={12} />
+                                                    </button>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div>
+                                            <label className="block text-sm font-medium text-gray-700 mb-1">所需时长 (分钟)</label>
+                                            <input name="duration" type="number" className="w-full border rounded-lg p-2" placeholder="30" />
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-1">主要原料 <span className="text-gray-400 text-xs">(选填，用逗号分隔可生成标签)</span></label>
+                                        <textarea name="ingredients" className="w-full border rounded-lg p-2 h-20" placeholder="五花肉, 姜片, 葱段..." />
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-1">制作步骤 <span className="text-gray-400 text-xs">(选填)</span></label>
+                                        <textarea name="method" className="w-full border rounded-lg p-2 h-32" placeholder="1. 焯水... 2. 炒糖色..." />
+                                    </div>
+                                    <button type="submit" className="w-full bg-orange-500 text-white py-3 rounded-xl font-bold hover:bg-orange-600">
+                                        {isEditingRecipe ? '保存修改' : '发布菜谱'}
+                                    </button>
+                                </form>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Recipe Detail Modal */}
+                    {selectedRecipe && (
+                        <div className="fixed inset-0 bg-black/60 z-50 flex justify-end animate-fade-in">
+                            <div className="bg-white w-full md:max-w-md h-full overflow-y-auto animate-slide-in-right">
+                                <div className="relative">
+                                    {selectedRecipe.images && selectedRecipe.images.length > 0 ? (
+                                        <div className="flex overflow-x-auto snap-x snap-mandatory scrollbar-hide">
+                                            {selectedRecipe.images.map((img, i) => (
+                                                <img key={i} src={img} className="w-full h-64 object-cover flex-shrink-0 snap-center" alt={selectedRecipe.name} />
+                                            ))}
+                                        </div>
+                                    ) : (
+                                        <div className="w-full h-64 bg-gray-200 flex items-center justify-center text-gray-400">
+                                            <Camera size={48} className="opacity-20" />
+                                        </div>
+                                    )}
+                                    
+                                    {selectedRecipe.images && selectedRecipe.images.length > 1 && (
+                                        <div className="absolute bottom-2 left-0 right-0 flex justify-center gap-1">
+                                            {selectedRecipe.images.map((_, i) => (
+                                                <div key={i} className="w-1.5 h-1.5 rounded-full bg-white/80 shadow-sm" />
+                                            ))}
+                                        </div>
+                                    )}
+
+                                    <button 
+                                        onClick={() => setSelectedRecipe(null)}
+                                        className="absolute top-4 left-4 bg-white/80 p-2 rounded-full hover:bg-white"
+                                    >
+                                        <span className="sr-only">返回</span>
+                                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/></svg>
+                                    </button>
+                                    <button 
+                                        onClick={() => openEditRecipeModal(selectedRecipe)}
+                                        className="absolute top-4 right-4 bg-white/80 p-2 rounded-full hover:bg-white text-gray-700"
+                                    >
+                                        <Edit size={20} />
+                                    </button>
+                                </div>
+                                
+                                <div className="p-6">
+                                    <div className="flex justify-between items-start mb-4">
+                                        <h2 className="text-2xl font-bold text-gray-900">{selectedRecipe.name}</h2>
+                                        <div className="text-center bg-orange-50 px-3 py-1 rounded-lg flex-shrink-0 border border-orange-100">
+                                            <div className="text-xl font-bold text-orange-500">{selectedRecipe.orders || 0}</div>
+                                            <div className="text-[10px] text-gray-500">历史点餐</div>
+                                        </div>
+                                    </div>
+
+                                    <div className="flex gap-4 mb-6 text-sm text-gray-600">
+                                        {selectedRecipe.duration && (
+                                            <span className="flex items-center gap-1"><Clock size={16} /> {selectedRecipe.duration} 分钟</span>
+                                        )}
+                                        <span className="flex items-center gap-1"><Heart size={16} /> {selectedRecipe.likes} 赞</span>
+                                    </div>
+
+                                    <div className="space-y-6">
+                                        {selectedRecipe.ingredients && (
+                                            <div>
+                                                <h3 className="font-bold text-gray-800 mb-2 flex items-center gap-2">
+                                                    <Archive size={18} className="text-orange-500"/> 所需原料
+                                                </h3>
+                                                <div className="bg-orange-50 p-3 rounded-lg text-sm text-gray-700 leading-relaxed border border-orange-100">
+                                                    {selectedRecipe.ingredients}
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {selectedRecipe.method && (
+                                            <div>
+                                                <h3 className="font-bold text-gray-800 mb-2 flex items-center gap-2">
+                                                    <ChefHat size={18} className="text-orange-500"/> 烹饪方法
+                                                </h3>
+                                                <div className="text-gray-700 text-sm leading-loose whitespace-pre-wrap">
+                                                    {selectedRecipe.method}
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        <div className="border-t pt-6">
+                                            <h3 className="font-bold text-gray-800 mb-4">家人评论 ({selectedRecipe.comments?.length || 0})</h3>
+                                            <div className="space-y-4 mb-4">
+                                                {selectedRecipe.comments?.map((c, idx) => (
+                                                    <div key={idx} className="flex gap-3">
+                                                        <div className="w-8 h-8 bg-gray-200 rounded-full flex items-center justify-center flex-shrink-0">
+                                                            <User size={14} className="text-gray-500"/>
+                                                        </div>
+                                                        <div className="bg-gray-50 p-3 rounded-r-xl rounded-bl-xl flex-1">
+                                                            <p className="text-xs text-gray-400 mb-1">{new Date(c.createdAt).toLocaleDateString()} {c.author}</p>
+                                                            <p className="text-sm text-gray-800">{c.text}</p>
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                            <form onSubmit={(e) => handleComment(e, selectedRecipe)} className="flex gap-2">
+                                                <input name="comment" className="flex-1 border rounded-full px-4 py-2 text-sm focus:border-orange-500 outline-none" placeholder="说说这道菜..." />
+                                                <button type="submit" className="bg-orange-500 text-white p-2 rounded-full"><Send size={18} /></button>
+                                            </form>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Add Fridge Item Modal */}
+                    {isAddFridgeItemOpen && (
+                        <div className="fixed inset-0 bg-black/50 z-50 flex items-end md:items-center justify-center p-0 md:p-4 animate-fade-in">
+                            <div className="bg-white w-full md:max-w-md md:rounded-2xl rounded-t-2xl p-6 animate-slide-up">
+                                <h3 className="font-bold text-lg mb-6 text-gray-900">入库新食材</h3>
+                                
+                                <div className="mb-6 flex gap-3">
+                                    <div className="relative flex-1 bg-gray-50 border border-dashed rounded-xl h-24 flex flex-col items-center justify-center text-gray-400 cursor-pointer overflow-hidden hover:bg-gray-100 transition-colors">
+                                        {fridgePreviewImage ? (
+                                            <img src={fridgePreviewImage} className="absolute inset-0 w-full h-full object-cover" />
+                                        ) : (
+                                            <>
+                                                <Camera size={24} className="mb-1"/>
+                                                <span className="text-xs">拍照/上传</span>
+                                            </>
+                                        )}
+                                        <input type="file" accept="image/*" onChange={handleFridgeImageChange} className="absolute inset-0 opacity-0 cursor-pointer" />
+                                    </div>
+                                    <button 
+                                        onClick={simulateAI}
+                                        disabled={isSimulatingAI}
+                                        className="flex-1 bg-gradient-to-r from-violet-100 to-fuchsia-100 text-violet-600 rounded-xl flex flex-col items-center justify-center gap-1 hover:brightness-95 transition-all"
+                                    >
+                                        {isSimulatingAI ? <span className="text-xs">识别中...</span> : <>
+                                            <CheckCircle size={24} className="mb-1"/>
+                                            <span className="text-xs font-bold">智能识别 (模拟)</span>
+                                        </>}
+                                    </button>
+                                </div>
+
+                                <form onSubmit={handleAddFridgeItem} className="space-y-4">
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-1">食材名称</label>
+                                        <input 
+                                            required 
+                                            name="name" 
+                                            defaultValue={newItemForm.name}
+                                            key={newItemForm.name}
+                                            className="w-full border rounded-lg p-3 bg-gray-50 focus:bg-white transition-colors" 
+                                            placeholder="例如：牛奶" 
+                                        />
+                                    </div>
+                                    
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-2">存放位置</label>
+                                        <div className="grid grid-cols-3 gap-2">
+                                            <label className="cursor-pointer">
+                                                <input type="radio" name="storage" value="cold" defaultChecked className="peer sr-only"/>
+                                                <div className="text-center p-2 rounded-lg border peer-checked:bg-cyan-50 peer-checked:border-cyan-500 peer-checked:text-cyan-700">
+                                                    <Refrigerator size={20} className="mx-auto mb-1"/>
+                                                    <span className="text-xs">冷藏</span>
+                                                </div>
+                                            </label>
+                                            <label className="cursor-pointer">
+                                                <input type="radio" name="storage" value="frozen" className="peer sr-only"/>
+                                                <div className="text-center p-2 rounded-lg border peer-checked:bg-blue-50 peer-checked:border-blue-500 peer-checked:text-blue-700">
+                                                    <Snowflake size={20} className="mx-auto mb-1"/>
+                                                    <span className="text-xs">冷冻</span>
+                                                </div>
+                                            </label>
+                                            <label className="cursor-pointer">
+                                                <input type="radio" name="storage" value="ambient" className="peer sr-only"/>
+                                                <div className="text-center p-2 rounded-lg border peer-checked:bg-orange-50 peer-checked:border-orange-500 peer-checked:text-orange-700">
+                                                    <Archive size={20} className="mx-auto mb-1"/>
+                                                    <span className="text-xs">常温</span>
+                                                </div>
+                                            </label>
+                                        </div>
+                                    </div>
+
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div>
+                                            <label className="block text-sm font-medium text-gray-700 mb-1">入库日期</label>
+                                            <input required name="date" type="date" defaultValue={new Date().toISOString().split('T')[0]} className="w-full border rounded-lg p-2" />
+                                        </div>
+                                        <div>
+                                            <label className="block text-sm font-medium text-gray-700 mb-1">保质期 (天)</label>
+                                            <input 
+                                                required 
+                                                name="shelfLife" 
+                                                type="number" 
+                                                defaultValue={newItemForm.shelfLife} 
+                                                key={newItemForm.shelfLife}
+                                                className="w-full border rounded-lg p-2" 
+                                            />
+                                        </div>
+                                    </div>
+
+                                    <div className="flex gap-3 pt-2">
+                                        <button type="button" onClick={() => setIsAddFridgeItemOpen(false)} className="flex-1 bg-gray-100 text-gray-700 py-3 rounded-xl font-bold">取消</button>
+                                        <button type="submit" className="flex-1 bg-blue-500 text-white py-3 rounded-xl font-bold">确认入库</button>
+                                    </div>
+                                </form>
+                            </div>
+                        </div>
+                    )}
+
+                    <style>{`
+                        .h-safe-area-bottom { height: env(safe-area-inset-bottom); }
+                        @keyframes slide-up { from { transform: translateY(100%); } to { transform: translateY(0); } }
+                        .animate-slide-up { animation: slide-up 0.3s ease-out; }
+                        @keyframes slide-in-right { from { transform: translateX(100%); } to { transform: translateX(0); } }
+                        .animate-slide-in-right { animation: slide-in-right 0.3s ease-out; }
+                        @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+                        .animate-fade-in { animation: fade-in 0.3s ease-out; }
+                    `}</style>
+                </div>
+            );
+        }
+
+        const root = createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
